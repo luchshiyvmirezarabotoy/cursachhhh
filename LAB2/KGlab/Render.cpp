@@ -1,12 +1,13 @@
 #include "Render.h"
 #include "GUItextRectangle.h"
 
+#include <windows.h>
 #include <GL/gl.h>
 #include <GL/glu.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
-#include <windows.h>
+
 
 #ifdef _DEBUG
 #include <Debugapi.h>

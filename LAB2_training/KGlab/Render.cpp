@@ -1,8 +1,9 @@
 #include "Render.h"
 
+#include <windows.h>
 #include <GL/gl.h>
 #include <GL/glu.h>
-#include <windows.h>
+
 
 // Библиотека для разгрузки изображений
 // https://github.com/nothings/stb

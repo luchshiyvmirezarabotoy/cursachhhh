@@ -4,12 +4,13 @@
 #include "ObjLoader.h"
 #include "Texture.h"
 
+#include <windows.h>
 #include <GL/gl.h>
 #include <GL/glu.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
-#include <windows.h>
+
 
 #include "debout.h"
 
