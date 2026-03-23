@@ -1,7 +1,8 @@
 #include "Camera.h"
-
-#include <GL/glu.h>
 #include <windows.h>
+#include <GL/GL.h>
+#include <GL/glu.h>
+
 
 void Camera::setPosition(double x, double y, double z)
 {

@@ -41,7 +41,7 @@ class Vector3
         coords[2] = z;
     }
 
-    Vector3(std::initializer_list<double>& list)
+    Vector3(std::initializer_list<double> list) : Vector3()
     {
         coords[0] = *(list.begin());
         coords[1] = *(list.begin() + 1);
@@ -49,16 +49,15 @@ class Vector3
     }
 
     // Конструктор копий
-    Vector3(const Vector3& vec)
+    Vector3(const Vector3& vec) : Vector3()
     {
         std::memcpy(coords, vec.coords, 3 * sizeof(double));
     }
 
     // Конструктор перемещения
-    Vector3(Vector3&& vec) noexcept
+    Vector3(Vector3&& vec) noexcept : coords(nullptr)
     {
-        coords = vec.coords;
-        vec.coords = nullptr;
+        std::swap(coords, vec.coords);
     }
 
 #pragma endregion
@@ -125,12 +124,16 @@ class Vector3
 
     Vector3& operator=(const Vector3& vec)
     {
+        if (this == &vec) return *this; 
+
         std::memcpy(coords, vec.coords, 3 * sizeof(double));
         return *this;
     }
 
     Vector3& operator=(Vector3&& vec)
     {
+        if (&vec == this) return *this;
+        
         coords = vec.coords;
         vec.coords = nullptr;
         return *this;
@@ -149,6 +152,7 @@ class Vector3
         return newV;
     }
 
+    //векторное произведение
     Vector3 operator^(const Vector3& v) const
     {
         Vector3 V;
@@ -158,9 +162,23 @@ class Vector3
         return V;
     }
 
+    //скалярное произведение
     double operator&(const Vector3& v) const
     {
         return coords[0] * v.coords[0] + coords[1] * v.coords[1] + coords[2] * v.coords[2];
+    }
+
+    //покомпонентное произведение
+    Vector3 operator%(const Vector3& v) const
+    {
+        Vector3 newV;
+        newV.setCoords( coords[0] * v.coords[0],  coords[1] * v.coords[1],coords[2] * v.coords[2]);
+        return newV;
+    }
+
+    double &operator[](int i)
+    {
+        return coords[i];
     }
 
     const double* operator()() const

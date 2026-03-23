@@ -3,10 +3,12 @@
 #include "Vector3.h"
 
 #include <algorithm>
+
+#include <windows.h>
 #include <gl/GL.h>
 #include <gl/GLU.h>
 #include <tuple>
-#include <windows.h>
+
 
 extern OpenGL gl;
 
