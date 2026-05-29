@@ -1,496 +1,393 @@
-#include "MyOGL.h"
 #include "Render.h"
 
+#include "Camera.h"
+#include "MyOGL.h"
+
+#include <windows.h>
 #include <GL/gl.h>
 #include <GL/glu.h>
-#include <Math.h>
-#include <chrono>
-#include <condition_variable>
-#include <deque>
-#include <mutex>
-#include <thread>
 
-OpenGL gl;
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <vector>
 
-HWND wnd;
-
-// Блокировщики
-std::mutex hwnd_mutex;
-std::mutex message_mutex;
-std::condition_variable message_cv;
-bool have_message = true;
-
-std::thread gl_thread;
-
-std::thread msg_thread;
-std::deque<Message> msg_deque;
-
-std::atomic_bool bRender;
-std::atomic_bool bMsg;
-
-class Camera
+namespace
 {
-    double camDist = 5;
+	Camera camera;
 
-    int camNz = 1;
+	struct Point
+	{
+		double x;
+		double y;
+		double z;
 
-    double camX;
-    double camY;
-    double camZ;
-    int mouseX = -1, mouseY = -1;
+		const double* p() const
+		{
+			return &x;
+		}
+	};
 
-    bool drag = false;
+	GLuint topTextureId = 0;
 
-  public:
-    // Начальные углы камеры
-    double _fi1 = 1;
-    double _fi2 = 0.5;
+	const std::vector<std::array<double, 3>> sideColors = {
+		{ 0.86, 0.25, 0.21 },
+		{ 0.22, 0.58, 0.90 },
+		{ 0.18, 0.67, 0.41 },
+		{ 0.95, 0.70, 0.18 },
+		{ 0.62, 0.36, 0.71 },
+		{ 0.18, 0.73, 0.73 },
+		{ 0.82, 0.43, 0.15 },
+		{ 0.55, 0.49, 0.18 }
+	};
 
-    Camera()
-    {
-        caclulateCameraPos();
-    }
+	const double prismHeight = 3.5;
 
-    double distance()
-    {
-        return camDist;
-    }
+	const std::vector<Point> bottom = {
+		{ 0, 8, 0 },
+		{ 1, 1, 0 },
+		{ 7, 0, 0 },
+		{ 3, -5, 0 },
+		{ 0, -2, 0.0 },
+		{ -6, -7, 0.0 },
+		{ -9, -2, 0.0 },
+		{ -1, -0, 0.0 }
+	};
 
-    int nZ() const
-    {
-        return camNz;
-    }
-    double x() const
-    {
-        return camX;
-    }
-    double y() const
-    {
-        return camY;
-    }
-    double z() const
-    {
-        return camZ;
-    }
-    double fi1() const
-    {
-        return _fi1;
-    }
-    double fi2() const
-    {
-        return _fi2;
-    }
+	std::vector<Point> build_top()
+	{
+		std::vector<Point> top = bottom;
+		for (Point& p : top)
+		{
+			p.z = prismHeight;
+		}
+		return top;
+	}
 
-    void caclulateCameraPos()
-    {
-        camX = camDist * cos(_fi2) * cos(_fi1);
-        camY = camDist * cos(_fi2) * sin(_fi1);
-        camZ = camDist * sin(_fi2);
-        if (cos(_fi2) <= 0)
-            camNz = -1;
-        else
-            camNz = 1;
-    }
+	double polygon_area_xy(const std::vector<Point>& polygon)
+	{
+		double area = 0.0;
+		for (std::size_t i = 0; i < polygon.size(); ++i)
+		{
+			const Point& a = polygon[i];
+			const Point& b = polygon[(i + 1) % polygon.size()];
+			area += a.x * b.y - b.x * a.y;
+		}
+		return area * 0.5;
+	}
 
-    void Zoom(OpenGL* sender, MouseWheelEventArg arg)
-    {
-        if (arg.value < 0 && camDist <= 1)
-            return;
-        if (arg.value > 0 && camDist >= 100)
-            return;
+	double cross_xy(const Point& a, const Point& b, const Point& c)
+	{
+		return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+	}
 
-        camDist += 0.01 * arg.value;
+	bool point_in_triangle_xy(const Point& p, const Point& a, const Point& b, const Point& c)
+	{
+		const double ab = cross_xy(a, b, p);
+		const double bc = cross_xy(b, c, p);
+		const double ca = cross_xy(c, a, p);
 
-        caclulateCameraPos();
-    }
+		const bool hasNegative = (ab < 0.0) || (bc < 0.0) || (ca < 0.0);
+		const bool hasPositive = (ab > 0.0) || (bc > 0.0) || (ca > 0.0);
 
-    void MouseMovie(OpenGL* sender, MouseEventArg arg)
-    {
-        if (OpenGL::isKeyPressed('G'))
-            return;
+		return !(hasNegative && hasPositive);
+	}
 
-        if (mouseX == -1)
-        {
-            mouseX = arg.x;
-            mouseY = arg.y;
-            return;
-        }
-        int dx = mouseX - arg.x;
-        int dy = mouseY - arg.y;
-        mouseX = arg.x;
-        mouseY = arg.y;
+	std::vector<std::array<int, 3>> triangulate_polygon(const std::vector<Point>& polygon)
+	{
+		std::vector<std::array<int, 3>> triangles;
+		std::vector<int> indices;
+		indices.reserve(static_cast<int>(polygon.size()));
 
-        if (drag)
-        {
-            _fi1 = _fi1 + 0.01 * dx;
-            _fi2 = _fi2 - 0.01 * dy;
+		for (int i = 0; i < static_cast<int>(polygon.size()); ++i)
+		{
+			indices.push_back(i);
+		}
 
-            caclulateCameraPos();
-        }
-    }
-    void MouseLeave(OpenGL* sender, MouseEventArg arg)
-    {
-        mouseX = -1;
-    }
+		if (polygon_area_xy(polygon) < 0.0)
+		{
+			std::reverse(indices.begin(), indices.end());
+		}
 
-    void MouseStartDrag(OpenGL* sender, MouseEventArg arg)
-    {
-        drag = true;
-    }
+		while (indices.size() > 3)
+		{
+			bool earFound = false;
 
-    void MouseStopDrag(OpenGL* sender, MouseEventArg arg)
-    {
-        drag = false;
-        mouseX = -1;
-    }
+			for (std::size_t i = 0; i < indices.size(); ++i)
+			{
+				const int prevIndex = indices[(i + indices.size() - 1) % indices.size()];
+				const int currIndex = indices[i];
+				const int nextIndex = indices[(i + 1) % indices.size()];
 
-    void SetUpCamera()
-    {
-        // Сообщаем OpenGL настройки нашей камеры,
-        // где она находится и куда смотрит
-        // https://learn.microsoft.com/ru-ru/windows/win32/opengl/glulookat
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-        gluLookAt(camX, camY, camZ, 0, 0, 0, 0, 0, camNz);
-    }
+				const Point& prev = polygon[prevIndex];
+				const Point& curr = polygon[currIndex];
+				const Point& next = polygon[nextIndex];
 
-} camera;
+				if (cross_xy(prev, curr, next) <= 0.0)
+				{
+					continue;
+				}
 
-void render_cycle();
-void message_cycle();
+				bool containsPoint = false;
+				for (std::size_t j = 0; j < indices.size(); ++j)
+				{
+					const int testIndex = indices[j];
+					if (testIndex == prevIndex || testIndex == currIndex || testIndex == nextIndex)
+					{
+						continue;
+					}
 
-void setHwnd(HWND window)
-{
-    std::lock_guard<std::mutex> guard(hwnd_mutex);
-    gl.setHWND(window);
+					if (point_in_triangle_xy(polygon[testIndex], prev, curr, next))
+					{
+						containsPoint = true;
+						break;
+					}
+				}
+
+				if (containsPoint)
+				{
+					continue;
+				}
+
+				triangles.push_back({ prevIndex, currIndex, nextIndex });
+				indices.erase(indices.begin() + static_cast<std::ptrdiff_t>(i));
+				earFound = true;
+				break;
+			}
+
+			if (!earFound)
+			{
+				return triangles;
+			}
+		}
+
+		if (indices.size() == 3)
+		{
+			triangles.push_back({ indices[0], indices[1], indices[2] });
+		}
+
+		return triangles;
+	}
+
+	Point normalize(const Point& v)
+	{
+		const double len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+		if (len == 0.0)
+		{
+			return { 0.0, 0.0, 0.0 };
+		}
+		return { v.x / len, v.y / len, v.z / len };
+	}
+
+	Point side_normal(const Point& a, const Point& b)
+	{
+		const double dx = b.x - a.x;
+		const double dy = b.y - a.y;
+		return normalize({ -dy, dx, 0.0 });
+	}
+
+	void top_uv(const Point& p, double& u, double& v)
+	{
+		const double minX = -9.0;
+		const double maxX = 7.0;
+		const double minY = -7.0;
+		const double maxY = 8.0;
+
+		u = (p.x - minX) / (maxX - minX);
+		v = (p.y - minY) / (maxY - minY);
+	}
+
+	void create_top_texture()
+	{
+		const int width = 256;
+		const int height = 256;
+		std::vector<unsigned char> pixels(width * height * 4);
+
+		for (int y = 0; y < height; ++y)
+		{
+			for (int x = 0; x < width; ++x)
+			{
+				const int index = (y * width + x) * 4;
+				const bool cell = ((x / 32) + (y / 32)) % 2 == 0;
+				const unsigned char r = cell ? 236 : 84;
+				const unsigned char g = cell ? 231 : 133;
+				const unsigned char b = cell ? 198 : 191;
+
+				pixels[index + 0] = static_cast<unsigned char>(r + (x / 8) % 20);
+				pixels[index + 1] = static_cast<unsigned char>(g + (y / 12) % 20);
+				pixels[index + 2] = b;
+				pixels[index + 3] = 255;
+			}
+		}
+
+		glGenTextures(1, &topTextureId);
+		glBindTexture(GL_TEXTURE_2D, topTextureId);
+
+		glTexImage2D(
+			GL_TEXTURE_2D,
+			0,
+			GL_RGBA,
+			width,
+			height,
+			0,
+			GL_RGBA,
+			GL_UNSIGNED_BYTE,
+			pixels.data());
+
+		glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
+	void setup_lighting()
+	{
+		float lamb[] = { 0.25f, 0.25f, 0.25f, 0.0f };
+		float ldif[] = { 0.85f, 0.85f, 0.85f, 0.0f };
+		float lspec[] = { 1.0f, 1.0f, 1.0f, 0.0f };
+		float lposition[] = { 10.0f, 12.0f, 14.0f, 1.0f };
+
+		glLightfv(GL_LIGHT0, GL_POSITION, lposition);
+		glLightfv(GL_LIGHT0, GL_AMBIENT, lamb);
+		glLightfv(GL_LIGHT0, GL_DIFFUSE, ldif);
+		glLightfv(GL_LIGHT0, GL_SPECULAR, lspec);
+		glEnable(GL_LIGHT0);
+		glEnable(GL_LIGHTING);
+		glEnable(GL_NORMALIZE);
+	}
+
+	void setup_material()
+	{
+		float amb[] = { 0.35f, 0.35f, 0.35f, 1.0f };
+		float dif[] = { 0.85f, 0.85f, 0.85f, 1.0f };
+		float spec[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+		float sh = 0.18f * 256.0f;
+
+		glMaterialfv(GL_FRONT, GL_AMBIENT, amb);
+		glMaterialfv(GL_FRONT, GL_DIFFUSE, dif);
+		glMaterialfv(GL_FRONT, GL_SPECULAR, spec);
+		glMaterialf(GL_FRONT, GL_SHININESS, sh);
+		glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
+		glEnable(GL_COLOR_MATERIAL);
+	}
+
+	void draw_side_faces(const std::vector<Point>& top)
+	{
+		const std::size_t count = bottom.size();
+
+		glDisable(GL_TEXTURE_2D);
+		glBegin(GL_QUADS);
+		for (std::size_t i = 0; i < count; ++i)
+		{
+			const std::size_t next = (i + 1) % count;
+			const Point normal = side_normal(bottom[i], bottom[next]);
+			const std::array<double, 3>& color = sideColors[i % sideColors.size()];
+
+			glColor3d(color[0], color[1], color[2]);
+			glNormal3dv(normal.p());
+
+			glVertex3dv(bottom[i].p());
+			glVertex3dv(top[i].p());
+			glVertex3dv(top[next].p());
+			glVertex3dv(bottom[next].p());
+		}
+		glEnd();
+	}
+
+	void draw_bottom_face(const std::vector<std::array<int, 3>>& triangles)
+	{
+		glDisable(GL_TEXTURE_2D);
+		glColor3d(0.92, 0.38, 0.49);
+		glNormal3d(0.0, 0.0, -1.0);
+		glBegin(GL_TRIANGLES);
+		for (std::size_t i = 0; i < triangles.size(); ++i)
+		{
+			const std::array<int, 3>& t = triangles[i];
+			glVertex3dv(bottom[t[2]].p());
+			glVertex3dv(bottom[t[1]].p());
+			glVertex3dv(bottom[t[0]].p());
+		}
+		glEnd();
+	}
+
+	void draw_top_face(const std::vector<Point>& top, const std::vector<std::array<int, 3>>& triangles)
+	{
+		glEnable(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, topTextureId);
+		glColor3d(1.0, 1.0, 1.0);
+		glNormal3d(0.0, 0.0, 1.0);
+
+		glBegin(GL_TRIANGLES);
+		for (std::size_t i = 0; i < triangles.size(); ++i)
+		{
+			const std::array<int, 3>& t = triangles[i];
+
+			double u = 0.0;
+			double v = 0.0;
+
+			top_uv(top[t[0]], u, v);
+			glTexCoord2d(u, v);
+			glVertex3dv(top[t[0]].p());
+
+			top_uv(top[t[1]], u, v);
+			glTexCoord2d(u, v);
+			glVertex3dv(top[t[1]].p());
+
+			top_uv(top[t[2]], u, v);
+			glTexCoord2d(u, v);
+			glVertex3dv(top[t[2]].p());
+		}
+		glEnd();
+
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glDisable(GL_TEXTURE_2D);
+	}
 }
 
-void start_gl_thread()
+extern OpenGL gl;
+
+void initRender()
 {
-    bRender = true;
-    gl_thread = std::thread(render_cycle);
+	camera.caclulateCameraPos();
+
+	gl.WheelEvent.reaction(&camera, &Camera::Zoom);
+	gl.MouseMovieEvent.reaction(&camera, &Camera::MouseMovie);
+	gl.MouseLeaveEvent.reaction(&camera, &Camera::MouseLeave);
+	gl.MouseLdownEvent.reaction(&camera, &Camera::MouseStartDrag);
+	gl.MouseLupEvent.reaction(&camera, &Camera::MouseStopDrag);
+
+	camera.setPosition(0.0, -26.0, 16.0);
+
+	create_top_texture();
 }
 
-void start_msg_thread()
+void Render(double delta_time)
 {
-    std::unique_lock<std::mutex> lock(message_mutex);
-    bMsg = true;
-    msg_thread = std::thread(message_cycle);
-}
+	(void)delta_time;
 
-void add_message(Message msg)
-{
-    std::unique_lock<std::mutex> lock(message_mutex);
-    have_message = true;
-    message_cv.notify_all();
-    msg_deque.push_back(msg);
-}
+	camera.SetUpCamera();
+	gl.DrawAxes();
 
-void stop_all_threads()
-{
-    bRender = false;
-    bMsg = false;
-    gl_thread.join();
-    have_message = true;
-    message_cv.notify_all();
-    msg_thread.join();
-}
+	setup_lighting();
+	setup_material();
 
-void render_cycle()
-{
-    gl.init();
+	glDisable(GL_TEXTURE_2D);
 
-    //================НАСТРОЙКА КАМЕРЫ======================
-    camera.caclulateCameraPos();
+	glPointSize(8.0f);
+	glDisable(GL_LIGHTING);
+	glBegin(GL_POINTS);
+	glColor3d(1.0, 0.85, 0.15);
+	glVertex3d(10.0, 12.0, 14.0);
+	glEnd();
+	glEnable(GL_LIGHTING);
 
-    // Привязываем камеру к событиям "движка"
-    gl.WheelEvent.reaction(&camera, &Camera::Zoom);
-    gl.MouseMovieEvent.reaction(&camera, &Camera::MouseMovie);
-    gl.MouseLeaveEvent.reaction(&camera, &Camera::MouseLeave);
-    gl.MouseLdownEvent.reaction(&camera, &Camera::MouseStartDrag);
-    gl.MouseLupEvent.reaction(&camera, &Camera::MouseStopDrag);
+	const std::vector<Point> top = build_top();
+	const std::vector<std::array<int, 3>> triangles = triangulate_polygon(bottom);
 
-    glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
-
-    glEnable(GL_DEPTH_TEST); // Включаем z-буфер
-
-    auto end_render = std::chrono::steady_clock::now();
-
-    while (bRender)
-    {
-        auto cur_time = std::chrono::steady_clock::now();
-        auto deltatime = cur_time - end_render;
-        double delta = 1.0 * std::chrono::duration_cast<std::chrono::microseconds>(deltatime).count() / 1000000;
-        end_render = cur_time;
-        camera.SetUpCamera();
-        gl.render(delta);
-    }
-}
-
-void message_cycle()
-{
-    while (bMsg)
-    {
-        short mouseX = -1;
-        short mouseY = -1;
-
-        std::unique_lock<std::mutex> lock(message_mutex);
-        message_cv.wait(lock, [&]() { return have_message; });
-
-        while (!msg_deque.empty())
-        {
-            auto m = msg_deque.front();
-            msg_deque.pop_front();
-
-            switch (m.message)
-            {
-            case WM_MOUSELEAVE:
-                gl.mouseLeave(mouseX, mouseY);
-                break;
-            case WM_MOUSEWHEEL:
-                gl.wheelEvent(GET_WHEEL_DELTA_WPARAM(m.wParam));
-                break;
-            case WM_MOUSEMOVE:
-                mouseX = (short)LOWORD(m.lParam);
-                mouseY = (short)HIWORD(m.lParam);
-                gl.mouseMovie((short)LOWORD(m.lParam), (short)HIWORD(m.lParam));
-                break;
-            case WM_SIZE:
-                gl.try_to_resize((short)LOWORD(m.lParam), (short)HIWORD(m.lParam));
-                break;
-            case WM_LBUTTONDOWN:
-                gl.mouseLdown((short)LOWORD(m.lParam), (short)HIWORD(m.lParam));
-                break;
-            case WM_LBUTTONUP:
-                gl.mouseLup((short)LOWORD(m.lParam), (short)HIWORD(m.lParam));
-                break;
-            case WM_RBUTTONDOWN:
-                gl.mouseRdown((short)LOWORD(m.lParam), (short)HIWORD(m.lParam));
-                break;
-            case WM_RBUTTONUP:
-                gl.mouseRup((short)LOWORD(m.lParam), (short)HIWORD(m.lParam));
-                break;
-            case WM_MBUTTONDOWN:
-                gl.mouseMdown((short)LOWORD(m.lParam), (short)HIWORD(m.lParam));
-                break;
-            case WM_MBUTTONUP:
-                gl.mouseMup((short)LOWORD(m.lParam), (short)HIWORD(m.lParam));
-                break;
-            case WM_KEYUP:
-                gl.keyUp(m.wParam);
-                break;
-            case WM_KEYDOWN:
-                gl.keyDown(m.wParam);
-                break;
-            case WM_CLOSE:
-                // b_render = false;
-                bMsg = false;
-                msg_deque.clear();
-                break;
-            }
-        }
-        if (!bMsg)
-            break;
-        have_message = false;
-    }
-}
-
-OpenGL::OpenGL()
-{
-}
-OpenGL::~OpenGL()
-{
-}
-
-void OpenGL::setHWND(HWND window)
-{
-    g_hWnd = window;
-}
-
-void OpenGL::wheelEvent(float delta)
-{
-    MouseWheelEventArg arg{delta};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { WheelEvent.exec(this, arg); });
-}
-
-void OpenGL::mouseMovie(short mX, short mY)
-{
-    MouseEventArg arg{mX, mY};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { MouseMovieEvent.exec(this, arg); });
-}
-
-void OpenGL::mouseLeave(short mX, short mY)
-{
-    MouseEventArg arg{mX, mY};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { MouseLeaveEvent.exec(this, arg); });
-}
-
-void OpenGL::mouseLdown(short mX, short mY)
-{
-    MouseEventArg arg{mX, mY};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { MouseLdownEvent.exec(this, arg); });
-}
-
-void OpenGL::mouseLup(short mX, short mY)
-{
-    MouseEventArg arg{mX, mY};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { MouseLupEvent.exec(this, arg); });
-}
-
-void OpenGL::mouseRdown(short mX, short mY)
-{
-    MouseEventArg arg{mX, mY};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { MouseRdownEvent.exec(this, arg); });
-}
-
-void OpenGL::mouseRup(short mX, short mY)
-{
-    MouseEventArg arg{mX, mY};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { MouseRupEvent.exec(this, arg); });
-}
-
-void OpenGL::mouseMdown(short mX, short mY)
-{
-    MouseEventArg arg{mX, mY};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { MouseMdownEvent.exec(this, arg); });
-}
-
-void OpenGL::mouseMup(short mX, short mY)
-{
-    MouseEventArg arg{mX, mY};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { MouseMupEvent.exec(this, arg); });
-}
-
-void OpenGL::keyDown(int key)
-{
-    KeyEventArg arg{key};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { KeyDownEvent.exec(this, arg); });
-}
-
-void OpenGL::keyUp(int key)
-{
-    KeyEventArg arg{key};
-    std::lock_guard<std::mutex> lock(events_mutex);
-    events_for_render.push_back([this, arg]() { KeyUpEvent.exec(this, arg); });
-}
-
-void OpenGL::DrawAxes()
-{
-    glDisable(GL_LIGHTING);
-    glDisable(GL_TEXTURE_2D);
-
-    glBegin(GL_LINES);
-    glColor3f(1, 0, 0);
-    glVertex3d(0, 0, 0);
-    glVertex3d(10, 0, 0);
-
-    glColor3f(0, 1, 0);
-    glVertex3d(0, 0, 0);
-    glVertex3d(0, 10, 0);
-
-    glColor3f(0, 0, 1);
-    glVertex3d(0, 0, 0);
-    glVertex3d(0, 0, 10);
-    glEnd();
-
-    glColor3f(0.0f, 0.0f, 0.0f);
-}
-
-void OpenGL::render(double delta)
-{
-
-    if (resize_pending)
-    {
-        resize_pending = false;
-        gl.resize(gl.tmp_width, gl.tmp_height);
-    }
-
-    if (events_for_render.empty() == false)
-    {
-        std::lock_guard<std::mutex> lock(events_mutex);
-        for (auto& x : events_for_render)
-            x();
-        events_for_render.clear();
-    }
-
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    camera.SetUpCamera();
-    gl.DrawAxes();
-    Render(delta);
-
-    SwapBuffers(g_hDC);
-}
-
-void OpenGL::try_to_resize(int w, int h)
-{
-    resize_pending = true;
-    tmp_height = h;
-    tmp_width = w;
-}
-
-void OpenGL::resize(int w, int h)
-{
-    width = w;
-    height = h;
-    glViewport(0, 0, width, height);
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-
-    gluPerspective(45.0, (GLdouble)width / (GLdouble)height, 0.2, 200.0);
-
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-}
-
-void OpenGL::init(void)
-{
-    PIXELFORMATDESCRIPTOR pfd;
-    memset(&pfd, 0, sizeof(PIXELFORMATDESCRIPTOR));
-
-    pfd.nSize = sizeof(PIXELFORMATDESCRIPTOR);
-    pfd.nVersion = 1;
-    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-    pfd.iPixelType = PFD_TYPE_RGBA;
-    pfd.cColorBits = 16;
-    pfd.cDepthBits = 16;
-
-    g_hDC = GetDC(g_hWnd);
-    GLuint iPixelFormat = ChoosePixelFormat(g_hDC, &pfd);
-
-    if (iPixelFormat != 0)
-    {
-        PIXELFORMATDESCRIPTOR bestMatch_pfd;
-        DescribePixelFormat(g_hDC, iPixelFormat, sizeof(pfd), &bestMatch_pfd);
-
-        if (bestMatch_pfd.cDepthBits < pfd.cDepthBits)
-        {
-            return;
-        }
-
-        if (SetPixelFormat(g_hDC, iPixelFormat, &pfd) == FALSE)
-        {
-            DWORD dwErrorCode = GetLastError();
-            return;
-        }
-    }
-    else
-    {
-        DWORD dwErrorCode = GetLastError();
-        return;
-    }
-
-    g_hRC = wglCreateContext(g_hDC);
-    wglMakeCurrent(g_hDC, g_hRC);
+	draw_side_faces(top);
+	draw_bottom_face(triangles);
+	draw_top_face(top, triangles);
 }
